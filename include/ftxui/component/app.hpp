@@ -33,6 +33,82 @@ class TaskRunner;
 /// @ingroup component
 class App : public Screen {
  public:
+  /// @ingroup component
+  /// @brief Configure DEC mouse reporting modes used while the screen is
+  /// active.
+  ///
+  /// Each flag maps to one DEC private mode. The defaults match FTXUI's
+  /// historical behavior.
+  ///
+  /// - `x10`            -> `?9h`
+  /// - `vt200`          -> `?1000h`
+  /// - `vt200_highlight`-> `?1001h`
+  /// - `button_event`   -> `?1002h`
+  /// - `any_event`      -> `?1003h`
+  /// - `focus_event`    -> `?1004h`
+  /// - `utf8`           -> `?1005h`
+  /// - `sgr`            -> `?1006h`
+  /// - `urxvt`          -> `?1015h`
+  /// - `sgr_pixels`     -> `?1016h`
+  struct MouseTrackingMode {
+    bool x10 = false;
+    bool vt200 = true;
+    bool vt200_highlight = false;
+    bool button_event = false;
+    bool any_event = true;
+    bool focus_event = false;
+    bool utf8 = false;
+    bool sgr = true;
+    bool urxvt = true;
+    bool sgr_pixels = false;
+
+    /// @brief Disable all mouse reporting modes.
+    static MouseTrackingMode Disabled();
+    /// @brief Enable hover-capable mouse reporting (default FTXUI behavior).
+    static MouseTrackingMode Hover();
+    /// @brief Enable click/drag reporting without hover motion.
+    static MouseTrackingMode ButtonDrag();
+  };
+
+  /// @ingroup component
+  /// @brief Configure cursor-shape querying/restoration behavior.
+  ///
+  /// This controls whether FTXUI requests the terminal current cursor shape
+  /// (DECRQSS/DECSCUSR) and whether that shape is restored on exit.
+  struct CursorShapeMode {
+    bool query_current_shape = true;
+    bool restore_shape_on_exit = true;
+
+    /// @brief Query and restore cursor shape (default behavior).
+    static CursorShapeMode Managed();
+    /// @brief Only ensure the cursor is visible on exit, skip shape query and
+    /// restoration.
+    static CursorShapeMode VisibleOnly();
+  };
+
+  /// @ingroup component
+  /// @brief Options for temporary terminal handoff when running native I/O.
+  ///
+  /// This is intended for functions that temporarily leave FTXUI control,
+  /// execute terminal-native code (for example SSH or pager), then restore
+  /// FTXUI.
+  struct TerminalHandoffOptions {
+    /// Mouse mode applied for the handoff window.
+    MouseTrackingMode mouse_mode = MouseTrackingMode::Disabled();
+    /// Cursor-shape mode applied for the handoff window.
+    CursorShapeMode cursor_mode = CursorShapeMode::VisibleOnly();
+    /// Restore previous mouse mode after handoff.
+    bool restore_mouse_mode = true;
+    /// Restore previous cursor-shape mode after handoff.
+    bool restore_cursor_mode = true;
+    /// Disable local stdin echo during the handoff body.
+    bool suppress_stdin_echo = true;
+    /// Flush stdin before invoking handoff body.
+    bool flush_stdin_before = true;
+    /// Flush stdin after invoking handoff body.
+    bool flush_stdin_after = true;
+  };
+
   // Constructors:
   static App FixedSize(int dimx, int dimy);
   static App Fullscreen();
@@ -46,6 +122,26 @@ class App : public Screen {
 
   // Options. Must be called before Loop().
   void TrackMouse(bool enable = true);
+  /// @ingroup component
+  /// @brief Set explicit mouse-reporting modes for the active screen.
+  /// @note Call before `Loop()`, or from callbacks executed on the UI thread.
+  void SetMouseTrackingMode(const MouseTrackingMode& mode);
+  /// @ingroup component
+  /// @brief Return the configured mouse-reporting mode.
+  MouseTrackingMode GetMouseTrackingMode() const;
+  /// @ingroup component
+  /// @brief Temporarily apply mouse-reporting mode while executing `fn`.
+  Closure WithMouseTrackingMode(MouseTrackingMode mode, Closure fn);
+  /// @ingroup component
+  /// @brief Set cursor-shape management mode.
+  /// @note Call before `Loop()`, or from callbacks executed on the UI thread.
+  void SetCursorShapeMode(const CursorShapeMode& mode);
+  /// @ingroup component
+  /// @brief Return the configured cursor-shape management mode.
+  CursorShapeMode GetCursorShapeMode() const;
+  /// @ingroup component
+  /// @brief Temporarily apply cursor-shape mode while executing `fn`.
+  Closure WithCursorShapeMode(CursorShapeMode mode, Closure fn);
   void HandlePipedInput(bool enable = true);
 
   // Return the currently active app, nullptr if none.
@@ -67,6 +163,16 @@ class App : public Screen {
   // inputted one, but with the currently active app terminal hooks
   // temporarily uninstalled.
   Closure WithRestoredIO(Closure);
+  /// @ingroup component
+  /// @brief Run `fn` in a temporary terminal handoff with default options.
+  Closure WithTerminalHandoff(Closure);
+  /// @ingroup component
+  /// @brief Run `fn` in a temporary terminal handoff with explicit options.
+  ///
+  /// During the handoff, terminal hooks are temporarily uninstalled, selected
+  /// mouse/cursor modes are applied, and optional stdin echo/flush safeguards
+  /// are used before restoring the interactive screen.
+  Closure WithTerminalHandoff(TerminalHandoffOptions options, Closure);
 
   // FTXUI implements handlers for Ctrl-C and Ctrl-Z. By default, these handlers
   // are executed, even if the component catches the event. This avoid users
@@ -124,6 +230,9 @@ class App : public Screen {
   const bool use_alternative_screen_;
 
   bool track_mouse_ = true;
+  MouseTrackingMode mouse_tracking_mode_ = MouseTrackingMode::Hover();
+  MouseTrackingMode active_mouse_tracking_mode_ = MouseTrackingMode::Disabled();
+  CursorShapeMode cursor_shape_mode_ = CursorShapeMode::Managed();
 
   std::string set_cursor_position_;
   std::string reset_cursor_position_;

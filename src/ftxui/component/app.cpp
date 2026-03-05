@@ -209,6 +209,7 @@ enum class DECMode : std::uint16_t {
 
   kMouseBtnEventMouse = 1002,
   kMouseAnyEvent = 1003,
+  kMouseFocusEvent = 1004,
 
   kMouseUtf8 = 1005,
   kMouseSgrExtMode = 1006,
@@ -249,6 +250,74 @@ std::string Reset(const std::vector<DECMode>& parameters) {
 std::string DeviceStatusReport(DSRMode ps) {
   return CSI + std::to_string(int(ps)) + "n";
 }
+
+std::vector<DECMode> ToDecMouseModes(const App::MouseTrackingMode& mode) {
+  std::vector<DECMode> modes;
+  if (mode.x10) {
+    modes.push_back(DECMode::kMouseX10);
+  }
+  if (mode.vt200) {
+    modes.push_back(DECMode::kMouseVt200);
+  }
+  if (mode.vt200_highlight) {
+    modes.push_back(DECMode::kMouseVt200Highlight);
+  }
+  if (mode.button_event) {
+    modes.push_back(DECMode::kMouseBtnEventMouse);
+  }
+  if (mode.any_event) {
+    modes.push_back(DECMode::kMouseAnyEvent);
+  }
+  if (mode.focus_event) {
+    modes.push_back(DECMode::kMouseFocusEvent);
+  }
+  if (mode.utf8) {
+    modes.push_back(DECMode::kMouseUtf8);
+  }
+  if (mode.sgr) {
+    modes.push_back(DECMode::kMouseSgrExtMode);
+  }
+  if (mode.urxvt) {
+    modes.push_back(DECMode::kMouseUrxvtMode);
+  }
+  if (mode.sgr_pixels) {
+    modes.push_back(DECMode::kMouseSgrPixelsMode);
+  }
+  return modes;
+}
+
+#if !defined(_WIN32)
+class ScopedStdinEchoOff {
+ public:
+  ScopedStdinEchoOff(int fd, bool enable) : fd_(fd) {
+    if (!enable || fd_ < 0 || !isatty(fd_)) {
+      return;
+    }
+    if (tcgetattr(fd_, &saved_) != 0) {
+      return;
+    }
+    termios t = saved_;
+    t.c_lflag &= ~ECHO;
+    if (tcsetattr(fd_, TCSANOW, &t) == 0) {
+      armed_ = true;
+    }
+  }
+
+  ~ScopedStdinEchoOff() {
+    if (armed_) {
+      tcsetattr(fd_, TCSANOW, &saved_);
+    }
+  }
+
+  ScopedStdinEchoOff(const ScopedStdinEchoOff&) = delete;
+  ScopedStdinEchoOff& operator=(const ScopedStdinEchoOff&) = delete;
+
+ private:
+  int fd_ = -1;
+  termios saved_{};  // NOLINT
+  bool armed_ = false;
+};
+#endif
 
 class CapturedMouseImpl : public CapturedMouseInterface {
  public:
@@ -347,6 +416,39 @@ App App::FitComponent() {
   };
 }
 
+App::MouseTrackingMode App::MouseTrackingMode::Disabled() {
+  MouseTrackingMode mode;
+  mode.vt200 = false;
+  mode.any_event = false;
+  mode.sgr = false;
+  mode.urxvt = false;
+  return mode;
+}
+
+App::MouseTrackingMode App::MouseTrackingMode::Hover() {
+  return MouseTrackingMode{};
+}
+
+App::MouseTrackingMode App::MouseTrackingMode::ButtonDrag() {
+  MouseTrackingMode mode = Disabled();
+  mode.vt200 = true;
+  mode.button_event = true;
+  mode.sgr = true;
+  mode.urxvt = true;
+  return mode;
+}
+
+App::CursorShapeMode App::CursorShapeMode::Managed() {
+  return CursorShapeMode{};
+}
+
+App::CursorShapeMode App::CursorShapeMode::VisibleOnly() {
+  CursorShapeMode mode;
+  mode.query_current_shape = false;
+  mode.restore_shape_on_exit = false;
+  return mode;
+}
+
 /// @brief Set whether mouse is tracked and events reported.
 /// called outside of the main loop. E.g `App::Loop(...)`.
 /// @param enable Whether to enable mouse event tracking.
@@ -363,7 +465,82 @@ App App::FitComponent() {
 /// screen.Loop(component);
 /// ```
 void App::TrackMouse(bool enable) {
+  if (track_mouse_ == enable) {
+    return;
+  }
   track_mouse_ = enable;
+  if (g_active_screen != this) {
+    return;
+  }
+
+  const auto previous_modes = ToDecMouseModes(active_mouse_tracking_mode_);
+  if (!previous_modes.empty()) {
+    TerminalSend(Reset(previous_modes));
+  }
+
+  if (track_mouse_) {
+    active_mouse_tracking_mode_ = mouse_tracking_mode_;
+    const auto active_modes = ToDecMouseModes(active_mouse_tracking_mode_);
+    if (!active_modes.empty()) {
+      TerminalSend(Set(active_modes));
+    }
+  } else {
+    active_mouse_tracking_mode_ = MouseTrackingMode::Disabled();
+  }
+
+  TerminalFlush();
+}
+
+void App::SetMouseTrackingMode(const MouseTrackingMode& mode) {
+  mouse_tracking_mode_ = mode;
+  if (!track_mouse_ || g_active_screen != this) {
+    return;
+  }
+
+  const auto previous_mode = active_mouse_tracking_mode_;
+  active_mouse_tracking_mode_ = mouse_tracking_mode_;
+
+  const auto previous_modes = ToDecMouseModes(previous_mode);
+  if (!previous_modes.empty()) {
+    TerminalSend(Reset(previous_modes));
+  }
+
+  const auto active_modes = ToDecMouseModes(active_mouse_tracking_mode_);
+  if (!active_modes.empty()) {
+    TerminalSend(Set(active_modes));
+  }
+
+  TerminalFlush();
+}
+
+App::MouseTrackingMode App::GetMouseTrackingMode() const {
+  return mouse_tracking_mode_;
+}
+
+Closure App::WithMouseTrackingMode(MouseTrackingMode mode, Closure fn) {
+  return [this, mode, fn = std::move(fn)] {
+    const auto previous = GetMouseTrackingMode();
+    SetMouseTrackingMode(mode);
+    fn();
+    SetMouseTrackingMode(previous);
+  };
+}
+
+void App::SetCursorShapeMode(const CursorShapeMode& mode) {
+  cursor_shape_mode_ = mode;
+}
+
+App::CursorShapeMode App::GetCursorShapeMode() const {
+  return cursor_shape_mode_;
+}
+
+Closure App::WithCursorShapeMode(CursorShapeMode mode, Closure fn) {
+  return [this, mode, fn = std::move(fn)] {
+    const auto previous = GetCursorShapeMode();
+    SetCursorShapeMode(mode);
+    fn();
+    SetCursorShapeMode(previous);
+  };
 }
 
 /// @brief Enable or disable automatic piped input handling.
@@ -493,6 +670,48 @@ Closure App::WithRestoredIO(Closure fn) {  // NOLINT
   };
 }
 
+Closure App::WithTerminalHandoff(Closure fn) {  // NOLINT
+  return WithTerminalHandoff(TerminalHandoffOptions{}, std::move(fn));
+}
+
+Closure App::WithTerminalHandoff(TerminalHandoffOptions options,
+                                 Closure fn) {  // NOLINT
+  return [this, options, fn = std::move(fn)] {
+    const auto previous_mouse_mode = GetMouseTrackingMode();
+    const auto previous_cursor_mode = GetCursorShapeMode();
+    SetMouseTrackingMode(options.mouse_mode);
+    SetCursorShapeMode(options.cursor_mode);
+
+    auto run = WithRestoredIO([&] {
+#if !defined(_WIN32)
+      // WithRestoredIO() uninstalls terminal hooks first. At this point tty_fd_
+      // may already be closed/reset, so use the process stdin fd directly.
+      constexpr int handoff_fd = STDIN_FILENO;
+      if (options.flush_stdin_before && isatty(handoff_fd)) {
+        tcflush(handoff_fd, TCIFLUSH);
+      }
+      ScopedStdinEchoOff no_echo(handoff_fd, options.suppress_stdin_echo);
+#endif
+
+      fn();
+
+#if !defined(_WIN32)
+      if (options.flush_stdin_after && isatty(handoff_fd)) {
+        tcflush(handoff_fd, TCIFLUSH);
+      }
+#endif
+    });
+    run();
+
+    if (options.restore_mouse_mode) {
+      SetMouseTrackingMode(previous_mouse_mode);
+    }
+    if (options.restore_cursor_mode) {
+      SetCursorShapeMode(previous_cursor_mode);
+    }
+  };
+}
+
 /// @brief Force FTXUI to handle or not handle Ctrl-C, even if the component
 /// catches the Event::CtrlC.
 void App::ForceHandleCtrlC(bool force) {
@@ -540,12 +759,15 @@ void App::Install() {
   // ensure it is fully applied:
   on_exit_functions.emplace([this] { TerminalFlush(); });
 
-  // Request the terminal to report the current cursor shape. We will restore it
-  // on exit.
-  TerminalSend(DECRQSS_DECSCUSR);
+  // Request the terminal to report the current cursor shape when managed.
+  if (cursor_shape_mode_.query_current_shape) {
+    TerminalSend(DECRQSS_DECSCUSR);
+  }
   on_exit_functions.emplace([this] {
     TerminalSend("\033[?25h");  // Enable cursor.
-    TerminalSend("\033[" + std::to_string(cursor_reset_shape_) + " q");
+    if (cursor_shape_mode_.restore_shape_on_exit) {
+      TerminalSend("\033[" + std::to_string(cursor_reset_shape_) + " q");
+    }
   });
 
   // Install signal handlers to restore the terminal state on exit. The default
@@ -658,10 +880,19 @@ void App::Install() {
   });
 
   if (track_mouse_) {
-    enable({DECMode::kMouseVt200});
-    enable({DECMode::kMouseAnyEvent});
-    enable({DECMode::kMouseUrxvtMode});
-    enable({DECMode::kMouseSgrExtMode});
+    active_mouse_tracking_mode_ = mouse_tracking_mode_;
+    const auto active_modes = ToDecMouseModes(active_mouse_tracking_mode_);
+    if (!active_modes.empty()) {
+      TerminalSend(Set(active_modes));
+      on_exit_functions.emplace([this] {
+        const auto modes = ToDecMouseModes(active_mouse_tracking_mode_);
+        if (!modes.empty()) {
+          TerminalSend(Reset(modes));
+        }
+      });
+    }
+  } else {
+    active_mouse_tracking_mode_ = MouseTrackingMode::Disabled();
   }
 
   // After installing the new configuration, flush it to the terminal to
